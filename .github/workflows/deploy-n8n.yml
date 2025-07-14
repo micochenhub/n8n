@@ -1,0 +1,82 @@
+# 工作流的名称
+name: Deploy n8n to Huawei Cloud via ACR
+
+# 工作流的触发条件
+on:
+  # 允许你从 GitHub Actions 页面手动触发此工作流
+  workflow_dispatch:
+
+# 定义工作流中的作业
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 第 1 步：检出仓库代码
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      # 第 2 步：登录到您的阿里云容器镜像服务 (ACR)
+      - name: Login to Alibaba Cloud ACR
+        uses: docker/login-action@v2
+        with:
+          registry: ${{ secrets.ACR_REGISTRY }}.cn-hangzhou.personal.cr.aliyuncs.com
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      # 第 3 步：拉取 n8n 镜像，重新打标，并推送到您的 ACR
+      - name: Pull, Tag, and Push to ACR
+        run: |
+          # 根据您的信息，拼接出完整的镜像仓库地址
+          ACR_IMAGE_FULL_NAME="${{ secrets.ACR_REGISTRY }}.cn-hangzhou.personal.cr.aliyuncs.com/${{ secrets.ACR_NAMESPACE }}/n8n:latest"
+
+          echo "Step 1: Pulling latest n8n image from Docker Hub..."
+          docker pull n8nio/n8n:latest
+
+          echo "Step 2: Tagging image as ${ACR_IMAGE_FULL_NAME}"
+          docker tag n8nio/n8n:latest "${ACR_IMAGE_FULL_NAME}"
+
+          echo "Step 3: Pushing image to Alibaba Cloud ACR..."
+          docker push "${ACR_IMAGE_FULL_NAME}"
+
+      # 第 4 步：通过 SSH 连接到您的华为云服务器并部署
+      - name: Deploy to Huawei Cloud Server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          # SSH 连接凭证
+          host: ${{ secrets.HUAWEI_HOST }}
+          username: ${{ secrets.HUAWEI_USERNAME }}
+          key: ${{ secrets.HUAWEI_SSH_PRIVATE_KEY }}
+          
+          # 在远程服务器上执行的脚本
+          script: |
+            # 定义变量，与上面保持一致
+            ACR_IMAGE_FULL_NAME="${{ secrets.ACR_REGISTRY }}.cn-hangzhou.personal.cr.aliyuncs.com/${{ secrets.ACR_NAMESPACE }}/n8n:latest"
+            ACR_REGISTRY_URL="${{ secrets.ACR_REGISTRY }}.cn-hangzhou.personal.cr.aliyuncs.com"
+            CONTAINER_NAME="n8n"
+
+            echo "Step 1: Logging in to Alibaba Cloud ACR on the server..."
+            docker login --username=${{ secrets.ACR_USERNAME }} --password=${{ secrets.ACR_PASSWORD }} ${ACR_REGISTRY_URL}
+
+            echo "Step 2: Pulling the new n8n image from ACR..."
+            docker pull "${ACR_IMAGE_FULL_NAME}"
+
+            echo "Step 3: Stopping the current n8n container if it exists..."
+            docker stop ${CONTAINER_NAME} || true
+
+            echo "Step 4: Removing the old n8n container if it exists..."
+            docker rm ${CONTAINER_NAME} || true
+
+            echo "Step 5: Starting the new n8n container..."
+            docker run -d --restart always --name ${CONTAINER_NAME} \
+              -p 5678:5678 \
+              -v n8n_data:/home/node/.n8n \
+              "${ACR_IMAGE_FULL_NAME}"
+            
+            echo "Step 6: Logging out from ACR for security..."
+            docker logout ${ACR_REGISTRY_URL}
+
+            echo "Step 7: Cleaning up old, unused Docker images..."
+            docker image prune -f
+
+            echo "Deployment successful!"
